@@ -66,6 +66,14 @@
 %% </ul>
 %% </td>
 %% </tr>
+%% <tr>
+%% <td style="text-align: right; vertical-align: top;">4</td>
+%% <td>
+%% <ul>
+%% <li>Added uniform commands, replacing all existing commands.</li>
+%% </ul>
+%% </td>
+%% </tr>
 %% </table>
 
 -module(khepri_machine).
@@ -152,19 +160,28 @@
 
 -type triggered() :: #triggered{}.
 
--type command() :: #put{} |
-                   #delete{} |
-                   #tx{} |
-                   #register_trigger{} |
-                   #ack_triggered{} |
-                   #register_projection{} |
-                   #unregister_projections{} |
+-type command() :: #put_v{} |
+                   #delete_v{} |
+                   #tx_v{} |
+                   #register_trigger_v{} |
+                   #ack_triggered_v{} |
+                   #register_projection_v{} |
+                   #unregister_projections_v{} |
                    #dedup{} |
-                   #dedup_ack{} |
-                   #drop_dedups{}.
+                   #dedup_ack_v{} |
+                   #drop_dedups_v{}.
 %% Commands specific to this Ra machine.
 
--type old_command() :: #unregister_projection{}.
+-type old_command() :: #put{} |
+                       #delete{} |
+                       #tx{} |
+                       #register_trigger{} |
+                       #ack_triggered{} |
+                       #register_projection{} |
+                       #unregister_projection{} |
+                       #unregister_projections{} |
+                       #dedup_ack{} |
+                       #drop_dedups{}.
 %% Old commands that are still accepted by the Ra machine but never created.
 %%
 %% Even though Khepri no longer creates these commands, they may still be
@@ -177,6 +194,7 @@
                                member := ra:server_id(),
                                snapshot_interval => non_neg_integer(),
                                commands => [command() |
+                                            old_command() |
                                             {machine_version,
                                              non_neg_integer(),
                                              non_neg_integer()}],
@@ -386,9 +404,20 @@ put(StoreId, PathPattern, Payload, Options)
     Payload1 = khepri_payload:prepare(Payload),
     {CommandOptions, TreeAndPutOptions} = split_command_options(
                                             StoreId, Options),
-    Command = #put{path = PathPattern1,
-                   payload = Payload1,
-                   options = TreeAndPutOptions},
+    Command = case does_api_comply_with(uniform_commands, StoreId) of
+                  true ->
+                      {TreeOptions, PutOptions} = split_put_options(
+                                                    TreeAndPutOptions),
+                      CommandArgs = #put_v1{path = PathPattern1,
+                                            payload = Payload1,
+                                            put_options = PutOptions,
+                                            tree_options = TreeOptions},
+                      #put_v{args = CommandArgs};
+                  false ->
+                      #put{path = PathPattern1,
+                           payload = Payload1,
+                           options = TreeAndPutOptions}
+              end,
     process_command(StoreId, Command, CommandOptions);
 put(_StoreId, PathPattern, Payload, _Options) ->
     ?khepri_misuse(invalid_payload, #{path => PathPattern,
@@ -414,9 +443,16 @@ delete(StoreId, PathPattern, Options) when ?IS_KHEPRI_STORE_ID(StoreId) ->
     PathPattern1 = khepri_path:from_string(PathPattern),
     khepri_path:ensure_is_valid(PathPattern1),
     {CommandOptions, TreeOptions} = split_command_options(StoreId, Options),
-    %% TODO: Ensure `PutOptions' are not set this map.
-    Command = #delete{path = PathPattern1,
-                      options = TreeOptions},
+    %% TODO: Ensure `PutOptions' are not set in `Options'.
+    Command = case does_api_comply_with(uniform_commands, StoreId) of
+                  true ->
+                      CommandArgs = #delete_v1{path = PathPattern1,
+                                               tree_options = TreeOptions},
+                      #delete_v{args = CommandArgs};
+                  false ->
+                      #delete{path = PathPattern1,
+                              options = TreeOptions}
+              end,
     process_command(StoreId, Command, CommandOptions).
 
 -spec transaction(StoreId, FunOrPath, Args, ReadWrite, Options) -> Ret when
@@ -586,7 +622,14 @@ readwrite_transaction(
     readwrite_transaction1(StoreId, PathPattern1, Args, Options).
 
 readwrite_transaction1(StoreId, StandaloneFunOrPath, Args, Options) ->
-    Command = #tx{'fun' = StandaloneFunOrPath, args = Args},
+    Command = case does_api_comply_with(uniform_commands, StoreId) of
+                  true ->
+                      CommandArgs = #tx_v1{'fun' = StandaloneFunOrPath,
+                                           args = Args},
+                      #tx_v{args = CommandArgs};
+                  false ->
+                      #tx{'fun' = StandaloneFunOrPath, args = Args}
+              end,
     Options1 = maps:merge(#{protect_against_dups => true}, Options),
     case process_command(StoreId, Command, Options1) of
         {exception, _, _, _} = Exception ->
@@ -647,9 +690,18 @@ register_trigger(StoreId, TriggerId, EventFilter, StoredProcPath, Options)
     EventFilter1 = khepri_evf:wrap(EventFilter),
     StoredProcPath1 = khepri_path:from_string(StoredProcPath),
     khepri_path:ensure_is_valid(StoredProcPath1),
-    Command = #register_trigger{id = TriggerId,
+    Command = case does_api_comply_with(uniform_commands, StoreId) of
+                  true ->
+                      CommandArgs = #register_trigger_v1{
+                                       id = TriggerId,
+                                       sproc = StoredProcPath1,
+                                       event_filter = EventFilter1},
+                      #register_trigger_v{args = CommandArgs};
+                  false ->
+                      #register_trigger{id = TriggerId,
                                 sproc = StoredProcPath1,
-                                event_filter = EventFilter1},
+                                event_filter = EventFilter1}
+              end,
     process_command(StoreId, Command, Options).
 
 -spec register_projection(StoreId, PathPattern, Projection, Options) ->
@@ -691,8 +743,16 @@ register_projection(
 
             PathPattern = khepri_path:from_string(PathPattern0),
             khepri_path:ensure_is_valid(PathPattern),
-            Command = #register_projection{pattern = PathPattern,
-                                           projection = Projection},
+            Command = case does_api_comply_with(uniform_commands, StoreId) of
+                          true ->
+                              CommandArgs = #register_projection_v1{
+                                               pattern = PathPattern,
+                                               projection = Projection},
+                              #register_projection_v{args = CommandArgs};
+                          false ->
+                              #register_projection{pattern = PathPattern,
+                                                   projection = Projection}
+                      end,
             process_command(StoreId, Command, Options1);
         {error, _Reason} = Error ->
             Error
@@ -722,7 +782,13 @@ unregister_projections(StoreId, Names, Options)
   when ?IS_KHEPRI_STORE_ID(StoreId) andalso
        (Names =:= all orelse is_list(Names)) andalso
        is_map(Options) ->
-    Command = #unregister_projections{names = Names},
+    Command = case does_api_comply_with(uniform_commands, StoreId) of
+                  true ->
+                      CommandArgs = #unregister_projections_v1{names = Names},
+                      #unregister_projections_v{args = CommandArgs};
+                  false ->
+                      #unregister_projections{names = Names}
+              end,
     process_command(StoreId, Command, Options).
 
 -spec ack_triggers_execution(StoreId, TriggeredStoredProcs) ->
@@ -739,7 +805,14 @@ unregister_projections(StoreId, Names, Options)
 
 ack_triggers_execution(StoreId, TriggeredStoredProcs)
   when ?IS_KHEPRI_STORE_ID(StoreId) ->
-    Command = #ack_triggered{triggered = TriggeredStoredProcs},
+    Command = case does_api_comply_with(uniform_commands, StoreId) of
+                  true ->
+                      CommandArgs = #ack_triggered_v1{
+                                       triggered = TriggeredStoredProcs},
+                      #ack_triggered_v{args = CommandArgs};
+                  false ->
+                      #ack_triggered{triggered = TriggeredStoredProcs}
+              end,
     process_command(StoreId, Command, #{async => true}).
 
 -spec get_keep_while_conds_state(StoreId, Options) -> Ret when
@@ -918,7 +991,7 @@ set_default_options(StoreId, Options) ->
 
 -spec process_command(StoreId, Command, Options) -> Ret when
       StoreId :: khepri:store_id(),
-      Command :: command(),
+      Command :: command() | old_command(),
       Options :: khepri:command_options(),
       Ret :: any().
 %% @doc Processes a command which is appended to the Ra log and processed by
@@ -978,7 +1051,13 @@ process_sync_command(
             DedupCommand = #dedup{ref = CommandRef,
                                   expiry = Expiry,
                                   command = Command},
-            DedupAck = #dedup_ack{ref = CommandRef},
+            DedupAck = case does_api_comply_with(uniform_commands, StoreId) of
+                           true ->
+                               CommandArgs = #dedup_ack_v1{ref = CommandRef},
+                               #dedup_ack_v{args = CommandArgs};
+                           false ->
+                               #dedup_ack{ref = CommandRef}
+                       end,
             Ret = do_process_sync_command(
                     StoreId, DedupCommand, Options),
 
@@ -1466,6 +1545,7 @@ handle_aux(leader, cast, tick, AuxState, IntState) ->
     case ra_aux:effective_machine_version(IntState) of
         EffectiveMacVer
           when EffectiveMacVer >= ?API_BEHAV_MACVER(expire_dedups_from_tick) ->
+            #khepri_machine_aux{store_id = StoreId} = AuxState1,
             State = ra_aux:machine_state(IntState),
             Timestamp = erlang:system_time(millisecond),
             Dedups = get_dedups(State),
@@ -1482,7 +1562,20 @@ handle_aux(leader, cast, tick, AuxState, IntState) ->
                           [] ->
                               [];
                           _ ->
-                              DropDedups = #drop_dedups{refs = RefsToDrop},
+                              UseUniformCommands = does_api_comply_with(
+                                                     uniform_commands,
+                                                     StoreId),
+                              DropDedups = case UseUniformCommands of
+                                               true ->
+                                                   CommandArgs = (
+                                                     #drop_dedups_v1{
+                                                        refs = RefsToDrop}),
+                                                   #drop_dedups_v{
+                                                      args = CommandArgs};
+                                               false ->
+                                                   #drop_dedups{
+                                                      refs = RefsToDrop}
+                                           end,
                               [{append, DropDedups}]
                       end,
             {no_reply, AuxState1, IntState, Effects};
@@ -1578,35 +1671,74 @@ restore_projection(Projection, Tree, PathPattern) ->
 
 apply(
   Meta,
-  #put{path = PathPattern, payload = Payload, options = TreeAndPutOptions},
+  %% New versioned put command variant.
+  #put_v{args = #put_v1{path = PathPattern,
+                        payload = Payload,
+                        put_options = PutOptions,
+                        tree_options = TreeOptions}},
   State) ->
-    {TreeOptions, PutOptions} = split_put_options(TreeAndPutOptions),
     Ret = insert_or_update_node(
             State, PathPattern, Payload, PutOptions, TreeOptions, []),
     post_apply(Ret, Meta);
 apply(
   Meta,
-  #delete{path = PathPattern, options = TreeOptions},
+  %% Old non-versioned put command variant.
+  #put{path = PathPattern,
+       payload = Payload,
+       options = TreeAndPutOptions},
+  State) ->
+    {TreeOptions, PutOptions} = split_put_options(TreeAndPutOptions),
+    PutArgs = #put_v1{path = PathPattern,
+                      payload = Payload,
+                      put_options = PutOptions,
+                      tree_options = TreeOptions},
+    NewCommand = #put_v{args = PutArgs},
+    apply(Meta, NewCommand, State);
+apply(
+  Meta,
+  %% New versioned delete command variant.
+  #delete_v{args = #delete_v1{path = PathPattern,
+                              tree_options = TreeOptions}},
   State) ->
     Ret = delete_matching_nodes(State, PathPattern, TreeOptions, []),
     post_apply(Ret, Meta);
 apply(
   Meta,
-  #tx{'fun' = StandaloneFun, args = Args},
+  %% Old non-versioned delete command variant.
+  #delete{path = PathPattern,
+          options = TreeOptions},
+  State) ->
+    DeleteArgs = #delete_v1{path = PathPattern,
+                            tree_options = TreeOptions},
+    NewCommand = #delete_v{args = DeleteArgs},
+    apply(Meta, NewCommand, State);
+apply(
+  Meta,
+  #tx_v{args = #tx_v1{'fun' = StandaloneFun,
+                      args = Args}},
   State) when ?IS_HORUS_FUN(StandaloneFun) ->
     Ret = khepri_tx_adv:run(State, StandaloneFun, Args, true, Meta),
     post_apply(Ret, Meta);
 apply(
   Meta,
-  #tx{'fun' = PathPattern, args = Args},
+  #tx_v{args = #tx_v1{'fun' = PathPattern,
+                      args = Args}},
   State) when ?IS_KHEPRI_PATH_PATTERN(PathPattern) ->
     Ret = locate_sproc_and_execute_tx(State, PathPattern, Args, true, Meta),
     post_apply(Ret, Meta);
 apply(
   Meta,
-  #register_trigger{id = TriggerId,
-                    sproc = StoredProcPath,
-                    event_filter = EventFilter},
+  #tx{'fun' = StandaloneFun, args = Args},
+  State) ->
+    TxArgs = #tx_v1{'fun' = StandaloneFun,
+                    args = Args},
+    NewCommand = #tx_v{args = TxArgs},
+    apply(Meta, NewCommand, State);
+apply(
+  Meta,
+  #register_trigger_v{args = #register_trigger_v1{id = TriggerId,
+                                                  sproc = StoredProcPath,
+                                                  event_filter = EventFilter}},
   State) ->
     Triggers = get_triggers(State),
     StoredProcPath1 = khepri_path:realpath(StoredProcPath),
@@ -1622,7 +1754,18 @@ apply(
     post_apply(Ret, Meta);
 apply(
   Meta,
-  #ack_triggered{triggered = ProcessedTriggers},
+  #register_trigger{id = TriggerId,
+                    sproc = StoredProcPath,
+                    event_filter = EventFilter},
+  State) ->
+    RegisterTriggerArgs = #register_trigger_v1{id = TriggerId,
+                                               sproc = StoredProcPath,
+                                               event_filter = EventFilter},
+    NewCommand = #register_trigger_v{args = RegisterTriggerArgs},
+    apply(Meta, NewCommand, State);
+apply(
+  Meta,
+  #ack_triggered_v{args = #ack_triggered_v1{triggered = ProcessedTriggers}},
   State) ->
     EmittedTriggers = get_emitted_triggers(State),
     EmittedTriggers1 = EmittedTriggers -- ProcessedTriggers,
@@ -1631,7 +1774,16 @@ apply(
     post_apply(Ret, Meta);
 apply(
   Meta,
-  #register_projection{pattern = PathPattern, projection = Projection},
+  #ack_triggered{triggered = ProcessedTriggers},
+  State) ->
+    AckTriggeredArgs = #ack_triggered_v1{triggered = ProcessedTriggers},
+    NewCommand = #ack_triggered_v{args = AckTriggeredArgs},
+    apply(Meta, NewCommand, State);
+apply(
+  Meta,
+  #register_projection_v{
+     args = #register_projection_v1{pattern = PathPattern,
+                                    projection = Projection}},
   State) ->
     ProjectionName = khepri_projection:name(Projection),
     ProjectionTree = get_projections(State),
@@ -1663,7 +1815,15 @@ apply(
     end;
 apply(
   Meta,
-  #unregister_projections{names = Names},
+  #register_projection{pattern = PathPattern, projection = Projection},
+  State) ->
+    RegisterProjectionArgs = #register_projection_v1{pattern = PathPattern,
+                                                     projection = Projection},
+    NewCommand = #register_projection_v{args = RegisterProjectionArgs},
+    apply(Meta, NewCommand, State);
+apply(
+  Meta,
+  #unregister_projections_v{args = #unregister_projections_v1{names = Names}},
   State) ->
     RemoveProjection = case Names of
                            all ->
@@ -1703,6 +1863,13 @@ apply(
     post_apply(Ret, Meta);
 apply(
   Meta,
+  #unregister_projections{names = Names},
+  State) ->
+    UnregisterProjectionsArgs = #unregister_projections_v1{names = Names},
+    NewCommand = #unregister_projections_v{args = UnregisterProjectionsArgs},
+    apply(Meta, NewCommand, State);
+apply(
+  Meta,
   #unregister_projection{name = Name},
   State) ->
     %% This command was replaced by `#unregister_projections{}'. Therefore,
@@ -1731,7 +1898,7 @@ apply(
     end;
 apply(
   #{machine_version := MacVer} = Meta,
-  #dedup_ack{ref = CommandRef},
+  #dedup_ack_v{args = #dedup_ack_v1{ref = CommandRef}},
   State)
   when is_reference(CommandRef) andalso
        MacVer >= ?API_BEHAV_MACVER(dedup_protection) ->
@@ -1746,10 +1913,17 @@ apply(
     Ret = {State1, ok},
     post_apply(Ret, Meta);
 apply(
+  Meta,
+  #dedup_ack{ref = CommandRef},
+  State) ->
+    DedupAckArgs = #dedup_ack_v1{ref = CommandRef},
+    NewCommand = #dedup_ack_v{args = DedupAckArgs},
+    apply(Meta, NewCommand, State);
+apply(
   #{machine_version := MacVer} = Meta,
-  #drop_dedups{refs = RefsToDrop},
+  #drop_dedups_v{args = #drop_dedups_v1{refs = RefsToDrop}},
   State) when MacVer >= ?API_BEHAV_MACVER(expire_dedups_from_tick) ->
-    %% `#drop_dedups{}' is emitted by the `handle_aux/5' clause for the `tick'
+    %% `#drop_dedups*{}' is emitted by the `handle_aux/5' clause for the `tick'
     %% effect to periodically drop dedups that have expired. This expiration
     %% was originally done in `post_apply/2' via `drop_expired_dedups/2' until
     %% machine version 2. Note that `drop_expired_dedups/2' is used until a
@@ -1759,6 +1933,13 @@ apply(
     State1 = set_dedups(State, Dedups1),
     Ret = {State1, ok},
     post_apply(Ret, Meta);
+apply(
+  Meta,
+  #drop_dedups{refs = RefsToDrop},
+  State) ->
+    DropDedupsArgs = #drop_dedups_v1{refs = RefsToDrop},
+    NewCommand = #drop_dedups_v{args = DropDedupsArgs},
+    apply(Meta, NewCommand, State);
 apply(Meta, {machine_version, OldMacVer, NewMacVer}, OldState) ->
     NewState = convert_state(OldState, OldMacVer, NewMacVer),
     Ret = {NewState, ok},
@@ -2865,6 +3046,8 @@ convert_state1(State, 1, 2) ->
     Tree1 = khepri_tree:convert_tree(Tree, 1, 2),
     set_tree(State, Tree1);
 convert_state1(State, 2, 3) ->
+    State;
+convert_state1(State, 3, 4) ->
     State.
 
 -spec update_projections(OldState, NewState) -> ok when
