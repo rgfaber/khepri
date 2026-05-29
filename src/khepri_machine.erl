@@ -1993,7 +1993,13 @@ do_apply(Meta, {machine_version, OldMacVer, NewMacVer}, OldState) ->
     #config{store_id = StoreId} = get_config(NewState),
     cache_effective_machine_version(StoreId, NewMacVer),
     post_apply(Ret, Meta);
-do_apply(#{machine_version := MacVer} = Meta, UnknownCommand, State) ->
+do_apply(Meta, UnknownCommand, State) ->
+    handle_unknown_command(Meta, UnknownCommand, State).
+
+handle_unknown_command(
+  #{machine_version := MacVer} = Meta,
+  UnknownCommand,
+  State) ->
     Error = ?khepri_exception(
                unknown_khepri_state_machine_command,
                #{command => UnknownCommand,
